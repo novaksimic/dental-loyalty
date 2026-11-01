@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DentalLoyalty.Api/DentalLoyalty.Api.csproj" />
+    <Project Path="src/DentalLoyalty.Application/DentalLoyalty.Application.csproj" />
+    <Project Path="src/DentalLoyalty.Domain/DentalLoyalty.Domain.csproj" />
+    <Project Path="src/DentalLoyalty.Infrastructure/DentalLoyalty.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DentalLoyalty.UnitTests/DentalLoyalty.UnitTests.csproj" />
+  </Folder>
+</Solution>

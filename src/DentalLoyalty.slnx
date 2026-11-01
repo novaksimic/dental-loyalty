@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="../tests/DentalLoyalty.UnitTests/DentalLoyalty.UnitTests.csproj" />
+  <Project Path="DentalLoyalty.Api/DentalLoyalty.Api.csproj" />
+  <Project Path="DentalLoyalty.Application/DentalLoyalty.Application.csproj" />
+  <Project Path="DentalLoyalty.Domain/DentalLoyalty.Domain.csproj" />
+  <Project Path="DentalLoyalty.Infrastructure/DentalLoyalty.Infrastructure.csproj" />
+</Solution>
