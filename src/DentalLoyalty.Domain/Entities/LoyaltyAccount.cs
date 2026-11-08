@@ -131,7 +131,8 @@ public class LoyaltyAccount
         Reward reward,
         LoyaltyCycle activeCycle,
         bool alreadyRedeemedInCycle,
-        Guid redeemedBy)
+        Guid redeemedBy,
+        DateTime? redeemedAt = null)
     {
         ArgumentNullException.ThrowIfNull(reward);
         ArgumentNullException.ThrowIfNull(activeCycle);
@@ -154,7 +155,19 @@ public class LoyaltyAccount
                 "The loyalty cycle does not belong to this loyalty account's patient.");
         }
 
-        var now = DateTime.UtcNow;
+        // The instant of the redeeming operation: the one its loyalty cycle was
+        // brought up to date for (LoyaltyCycleProgression), so availability and
+        // any completion the redemption causes are decided at the same moment
+        // (BUSINESS.md §5.2, §5.3). Defaults to now.
+        var now = redeemedAt ?? DateTime.UtcNow;
+
+        if (now.Kind != DateTimeKind.Utc || now > DateTime.UtcNow)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(redeemedAt),
+                redeemedAt,
+                "The redemption time must be a UTC time that is not in the future.");
+        }
 
         if (reward.StatusFor(this, activeCycle, alreadyRedeemedInCycle, now) != RewardStatus.Available)
         {

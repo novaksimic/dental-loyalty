@@ -99,7 +99,8 @@ public class Referral
         ReferralParticipant referrer,
         ReferralParticipant referred,
         DateTime examinedAt,
-        Guid validatedBy)
+        Guid validatedBy,
+        DateTime? validatedAt = null)
     {
         ArgumentNullException.ThrowIfNull(referrer);
         ArgumentNullException.ThrowIfNull(referred);
@@ -122,7 +123,16 @@ public class Referral
             throw new DomainException("The loyalty accounts do not belong to this referral's patients.");
         }
 
-        var now = DateTime.UtcNow;
+        // The instant of the validating operation: the one the participants'
+        // cycles were brought up to date for (LoyaltyCycleProgression), so the
+        // referral rewards and any completion they cause are recorded at the
+        // same moment (BUSINESS.md §5.2, §5.3). Defaults to now.
+        var now = validatedAt ?? DateTime.UtcNow;
+
+        if (now.Kind != DateTimeKind.Utc || now > DateTime.UtcNow)
+        {
+            throw new DomainException("The validation time must be a UTC time that is not in the future.");
+        }
 
         if (examinedAt.Kind != DateTimeKind.Utc || examinedAt > now)
         {
