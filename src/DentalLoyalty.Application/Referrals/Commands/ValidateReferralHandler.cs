@@ -104,10 +104,12 @@ public sealed class ValidateReferralHandler
         var referrerParticipant = await GetParticipantAsync(referrer, clinicId, now, cancellationToken);
         var referredParticipant = await GetParticipantAsync(referred, clinicId, now, cancellationToken);
 
-        var validation = referral.Validate(referrerParticipant, referredParticipant, examinedAt, validatedBy);
+        // One instant for the whole operation: the cycles were brought up to
+        // date for now, so the rewards are credited at now.
+        var validation = referral.Validate(referrerParticipant, referredParticipant, examinedAt, validatedBy, validatedAt: now);
 
-        var referrerCompleted = await CompleteIfRewardedAsync(referrerParticipant, validation.Referrer, now, cancellationToken);
-        var referredCompleted = await CompleteIfRewardedAsync(referredParticipant, validation.Referred, now, cancellationToken);
+        var referrerCompleted = await CompleteIfRewardedAsync(referrerParticipant, validation.Referrer, validation, cancellationToken);
+        var referredCompleted = await CompleteIfRewardedAsync(referredParticipant, validation.Referred, validation, cancellationToken);
 
         await _loyaltyAccountRepository.SaveReferralValidationAsync(
             referral,
@@ -136,11 +138,15 @@ public sealed class ValidateReferralHandler
     }
 
     // Only a credited referral reward changes the account, so only it can
-    // satisfy the cycle's last completion condition (BUSINESS.md §5.2).
+    // satisfy the cycle's last completion condition (BUSINESS.md §5.2). The
+    // completion is recorded at the time of this patient's own referral
+    // transaction, so the reset never precedes it in history (as for
+    // redemptions). A Rewarded patient has exactly one: Referral.Validate adds
+    // one transaction per rewarded patient, and the two patients are distinct.
     private async Task<bool> CompleteIfRewardedAsync(
         ReferralParticipant participant,
         ReferralRewardOutcome outcome,
-        DateTime now,
+        ReferralValidation validation,
         CancellationToken cancellationToken)
     {
         if (outcome != ReferralRewardOutcome.Rewarded)
@@ -148,10 +154,14 @@ public sealed class ValidateReferralHandler
             return false;
         }
 
+        var rewardedAt = validation.Transactions
+            .Single(t => t.PatientId == participant.Account.PatientId)
+            .CreatedAt;
+
         var completion = await _loyaltyCycleProgression.CompleteIfSatisfiedAsync(
             participant.Account,
             participant.CurrentCycle!,
-            now,
+            rewardedAt,
             cancellationToken: cancellationToken);
 
         return completion is not null;

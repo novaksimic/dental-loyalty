@@ -132,7 +132,8 @@ public sealed class RedeemRewardHandler
             reward,
             currentCycle,
             alreadyRedeemedInCycle: false,
-            redeemedBy);
+            redeemedBy,
+            redeemedAt: now);
 
         var completion = await _loyaltyCycleProgression.CompleteIfSatisfiedAsync(
             account,

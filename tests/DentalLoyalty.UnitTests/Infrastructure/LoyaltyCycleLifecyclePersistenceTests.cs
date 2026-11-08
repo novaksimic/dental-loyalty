@@ -232,6 +232,34 @@ public sealed class LoyaltyCycleLifecyclePersistenceTests : IDisposable
         Assert.Equal((-resetPoints, -resetReferrals, cycles[0].Id), (reset.PointsChange, reset.ReferralChange, reset.LoyaltyCycleId));
     }
 
+    // The operation runs at one instant: the service is recorded - or the
+    // referral validated - and credited at it, and the completion it causes,
+    // the reset and the start of the next cycle are recorded at it too
+    // (BUSINESS.md §5.2, §5.4, §14).
+    private async Task AssertCompletedAtTriggerAsync(Guid patientId, LoyaltyTransactionType trigger)
+    {
+        var cycles = await ReadCyclesAsync(patientId);
+        var transactions = await ReadTransactionsAsync(patientId);
+        var earned = Assert.Single(transactions, t => t.Type == trigger);
+        var reset = Assert.Single(transactions, t => t.Type == LoyaltyTransactionType.CycleReset);
+
+        Assert.Equal(earned.CreatedAt, reset.CreatedAt);
+        Assert.Equal(earned.CreatedAt, cycles[0].EndedAt);
+        Assert.Equal(earned.CreatedAt, cycles[1].StartedAt);
+
+        await using var context = CreateContext();
+        DateTime? operationTime = trigger == LoyaltyTransactionType.ServicePointsEarned
+            ? await context.PatientServices.AsNoTracking()
+                .Where(ps => ps.Id == earned.PatientServiceId)
+                .Select(ps => (DateTime?)ps.RecordedAt)
+                .SingleAsync()
+            : await context.Referrals.AsNoTracking()
+                .Where(r => r.Id == earned.ReferralId)
+                .Select(r => r.CompletedAt)
+                .SingleAsync();
+        Assert.Equal(earned.CreatedAt, operationTime);
+    }
+
     private async Task AssertStillActiveAsync(Guid patientId)
     {
         var cycle = Assert.Single(await ReadCyclesAsync(patientId));
@@ -294,6 +322,7 @@ public sealed class LoyaltyCycleLifecyclePersistenceTests : IDisposable
         Assert.Equal(50_000, result.CreditedPoints);
         Assert.True(result.CycleCompleted);
         await AssertCompletedOnceAsync(data.PatientA.Id, 1_000_000, 5);
+        await AssertCompletedAtTriggerAsync(data.PatientA.Id, LoyaltyTransactionType.ServicePointsEarned);
     }
 
     // The fifth referral reward completes the referrer's cycle; the referred
@@ -312,6 +341,7 @@ public sealed class LoyaltyCycleLifecyclePersistenceTests : IDisposable
         Assert.Equal(new ReferralRewardResult(ReferralRewardOutcome.Rewarded, 0, CycleCompleted: true), result.Referrer);
         Assert.Equal(new ReferralRewardResult(ReferralRewardOutcome.Rewarded, 50_000, CycleCompleted: false), result.Referred);
         await AssertCompletedOnceAsync(data.PatientA.Id, 1_000_000, 5);
+        await AssertCompletedAtTriggerAsync(data.PatientA.Id, LoyaltyTransactionType.ReferralPointsEarned);
         await AssertStillActiveAsync(newPatient.Id);
     }
 

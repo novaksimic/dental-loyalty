@@ -227,6 +227,74 @@ public class SqlServerLoyaltyHistoryTests
         Assert.Single(history.Cycles[1].Redemptions);
     }
 
+    // A completion caused by service points or a referral reward is recorded at
+    // the time of that earning transaction, so on every read its reset is the
+    // later record and the completed cycle ends exactly then.
+    [SqlServerIntegrationFact]
+    public async Task CompletingServicePoints_AndTheirReset_AreOrderedChronologically()
+    {
+        await using var database = await SqlServerTestDatabase.CreateAsync();
+        var data = await SeedWithUnlockedRewardRedeemedAsync(database, 950_000, 5);
+
+        await RecordServiceAsync(database, data, data.PatientA.Id);
+
+        await AssertCompletedByAsync(database, data, LoyaltyTransactionType.ServicePointsEarned);
+    }
+
+    [SqlServerIntegrationFact]
+    public async Task CompletingReferralReward_AndItsReset_AreOrderedChronologically()
+    {
+        await using var database = await SqlServerTestDatabase.CreateAsync();
+        var data = await SeedWithUnlockedRewardRedeemedAsync(database, 1_000_000, 4);
+
+        await ReferAndValidateAsync(database, data, data.PatientA.Id, data.PatientB.Id);
+
+        await AssertCompletedByAsync(database, data, LoyaltyTransactionType.ReferralPointsEarned);
+    }
+
+    // Patient A with the given balances, having redeemed the only reward - so the
+    // next earning that reaches both targets completes the cycle (§5.2).
+    private static async Task<LoyaltyAccountTestData> SeedWithUnlockedRewardRedeemedAsync(
+        SqlServerTestDatabase database,
+        int points,
+        int referrals)
+    {
+        LoyaltyAccountTestData data;
+        await using (var context = database.CreateContext())
+        {
+            data = await LoyaltyAccountTestData.SeedAsync(context);
+            (await context.LoyaltyAccounts.SingleAsync(a => a.PatientId == data.PatientA.Id)).WithBalances(points, referrals);
+            await context.SaveChangesAsync();
+        }
+
+        var reward = await SeedRewardAsync(database, data.Clinic.Id, "Peskiranje", 300_000, 1);
+        Assert.False((await RedeemAsync(database, data, data.PatientA.Id, reward.Id)).CycleCompleted);
+        return data;
+    }
+
+    private static async Task AssertCompletedByAsync(
+        SqlServerTestDatabase database,
+        LoyaltyAccountTestData data,
+        LoyaltyTransactionType trigger)
+    {
+        for (var i = 0; i < 3; i++)
+        {
+            var page = (await ReadTransactionsAsync(database, data.Clinic.Id, data.PatientA.Id)).Transactions!;
+            Assert.Equal(
+                new[] { LoyaltyTransactionType.CycleReset, trigger, LoyaltyTransactionType.RewardRedeemed },
+                page.Items.Select(t => t.Type));
+            Assert.Equal(page.Items[0].OccurredAt, page.Items[1].OccurredAt);
+            Assert.Equal((-1_000_000, -5, LoyaltyCycleStatus.Completed),
+                (page.Items[0].PointsChange, page.Items[0].ReferralChange, page.Items[0].EndedCycleStatus));
+        }
+
+        var transactions = (await ReadTransactionsAsync(database, data.Clinic.Id, data.PatientA.Id)).Transactions!;
+        var history = await ReadHistoryAsync(database, data.Clinic.Id, LoyaltyHistorySubject.Patient(data.PatientA.Id));
+        Assert.Equal(new[] { LoyaltyCycleStatus.Active, LoyaltyCycleStatus.Completed }, history!.Cycles.Select(c => c.Status));
+        Assert.Equal(transactions.Items[1].OccurredAt, history.Cycles[1].EndedAt);
+        Assert.Equal(transactions.Items[1].OccurredAt, history.Cycles[0].StartedAt);
+    }
+
     [SqlServerIntegrationFact]
     public async Task Transactions_ArePagedWithOffsetFetch_WithoutGapsOrRepeats()
     {

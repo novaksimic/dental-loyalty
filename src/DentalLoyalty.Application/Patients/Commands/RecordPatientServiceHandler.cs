@@ -136,6 +136,8 @@ public sealed class RecordPatientServiceHandler
             save: true,
             cancellationToken);
 
+        // One instant for the whole operation: the cycle was brought up to date
+        // for now, so the service is recorded, accepted and credited at now.
         var patientService = new PatientService(
             command.PatientServiceId,
             patient,
@@ -143,7 +145,8 @@ public sealed class RecordPatientServiceHandler
             scoring,
             currentCycle,
             performedAt,
-            recordedBy);
+            recordedBy,
+            recordedAt: now);
 
         if (currentCycle is null || patient.UserId is null || !currentCycle.AcceptsService(patientService))
         {
@@ -156,10 +159,12 @@ public sealed class RecordPatientServiceHandler
 
         var transaction = account.EarnServicePoints(patientService, currentCycle);
 
+        // A completion is recorded at the time of the transaction that caused
+        // it, so the reset never precedes it in history (as for redemptions).
         var completion = await _loyaltyCycleProgression.CompleteIfSatisfiedAsync(
             account,
             currentCycle,
-            now,
+            transaction.CreatedAt,
             cancellationToken: cancellationToken);
 
         await _loyaltyAccountRepository.SaveServicePointsAsync(

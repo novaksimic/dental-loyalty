@@ -65,7 +65,9 @@ public class LoyaltyTransaction
             ReferralChange = 0,
             ServiceId = patientService.ServiceId,
             PatientServiceId = patientService.Id,
-            CreatedAt = DateTime.UtcNow,
+            // Credited when the service was recorded - the instant its cycle
+            // accepted it (LoyaltyCycle.AcceptsService).
+            CreatedAt = patientService.RecordedAt,
             CreatedBy = createdBy,
         };
     }
@@ -108,7 +110,8 @@ public class LoyaltyTransaction
             PointsChange = pointsCredited,
             ReferralChange = 1,
             ReferralId = referral.Id,
-            CreatedAt = DateTime.UtcNow,
+            // Credited when the referral was validated (Referral.Validate).
+            CreatedAt = referral.CompletedAt!.Value,
             CreatedBy = createdBy,
         };
     }

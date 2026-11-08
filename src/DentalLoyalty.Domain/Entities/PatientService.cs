@@ -53,7 +53,8 @@ public class PatientService
         LoyaltyConfiguration scoringConfiguration,
         LoyaltyCycle? activeCycle,
         DateTime performedAt,
-        Guid recordedBy)
+        Guid recordedBy,
+        DateTime? recordedAt = null)
     {
         ArgumentNullException.ThrowIfNull(patient);
         ArgumentNullException.ThrowIfNull(service);
@@ -69,9 +70,22 @@ public class PatientService
             throw new ArgumentException("The user recording the service is required.", nameof(recordedBy));
         }
 
-        var recordedAt = DateTime.UtcNow;
+        // The instant of the recording operation: the one its loyalty cycle was
+        // brought up to date for (LoyaltyCycleProgression), so whether the
+        // cycle had expired, whether it accepts the service and whether the
+        // service completes it are all decided at the same moment (BUSINESS.md
+        // §5.2, §5.3). Defaults to now.
+        var recordingTime = recordedAt ?? DateTime.UtcNow;
 
-        if (performedAt.Kind != DateTimeKind.Utc || performedAt > recordedAt)
+        if (recordingTime.Kind != DateTimeKind.Utc || recordingTime > DateTime.UtcNow)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(recordedAt),
+                recordedAt,
+                "The recording time must be a UTC time that is not in the future.");
+        }
+
+        if (performedAt.Kind != DateTimeKind.Utc || performedAt > recordingTime)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(performedAt),
@@ -116,7 +130,7 @@ public class PatientService
 
             // Points must never go to an expired cycle, and the next cycle is not
             // started here, so nothing is recorded against an expired one.
-            if (activeCycle.HasExpiredAt(recordedAt))
+            if (activeCycle.HasExpiredAt(recordingTime))
             {
                 throw new DomainException(
                     "The patient's loyalty cycle has expired.");
@@ -129,7 +143,7 @@ public class PatientService
         ServiceId = service.Id;
         PriceAtTimeOfService = service.Price;
         UsedAt = performedAt;
-        RecordedAt = recordedAt;
+        RecordedAt = recordingTime;
         RecordedBy = recordedBy;
 
         // A cycle exists only once the patient is registered and linked
