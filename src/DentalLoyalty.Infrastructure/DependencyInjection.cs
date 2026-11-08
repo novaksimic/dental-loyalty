@@ -49,6 +49,10 @@ public static class DependencyInjection
         services.AddScoped<RecordPatientServiceHandler>();
         services.AddScoped<IRewardRepository, RewardRepository>();
         services.AddScoped<GetPatientRewardsHandler>();
+        services.AddScoped<ILoyaltyHistoryRepository, LoyaltyHistoryRepository>();
+        services.AddScoped<LoyaltyHistoryStateLoader>();
+        services.AddScoped<GetLoyaltyHistoryHandler>();
+        services.AddScoped<GetLoyaltyTransactionsHandler>();
         services.AddScoped<RedeemRewardHandler>();
         services.AddScoped<IReferralRepository, ReferralRepository>();
         services.AddScoped<CreateReferralHandler>();

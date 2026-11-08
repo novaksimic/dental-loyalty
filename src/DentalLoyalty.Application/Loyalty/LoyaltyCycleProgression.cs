@@ -4,6 +4,12 @@ using DentalLoyalty.Domain.Loyalty;
 
 namespace DentalLoyalty.Application.Loyalty;
 
+// The patient's cycle as of now - null when they have none (not registered and
+// linked, §5.1) - and the not-yet-saved transitions that led to it.
+public sealed record LoyaltyCycleView(
+    LoyaltyCycle? Current,
+    IReadOnlyList<CycleTransition> PendingTransitions);
+
 // Applies the loyalty cycle lifecycle (BUSINESS.md §5.2-§5.4;
 // LoyaltyCycleLifecycle; ADR-008) for the use cases that read or change a
 // patient's loyalty state, so every one of them handles expiry and completion
@@ -77,6 +83,35 @@ public sealed class LoyaltyCycleProgression
         }
 
         return transitions[^1].Next;
+    }
+
+    // For read-only views that also present history (ADR-008 decision 6): the
+    // patient's cycle as of now and the transitions that the next operation will
+    // record for every cycle that expired by now - oldest first, empty when none
+    // expired. They are applied to the loaded account and cycle only; nothing is
+    // tracked for saving and nothing is saved.
+    public async Task<LoyaltyCycleView> ViewCurrentCycleAsync(
+        LoyaltyAccount account,
+        DateTime now,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(account);
+
+        var activeCycle = await _loyaltyCycleRepository.GetActiveForPatientAsync(
+            account.PatientId,
+            account.ClinicId,
+            cancellationToken);
+
+        if (activeCycle is null)
+        {
+            return new LoyaltyCycleView(null, []);
+        }
+
+        var transitions = LoyaltyCycleLifecycle.RollOverExpired(account, activeCycle, now);
+
+        return new LoyaltyCycleView(
+            transitions.Count == 0 ? activeCycle : transitions[^1].Next,
+            transitions);
     }
 
     // Completes the cycle if the operation that has just changed account - or

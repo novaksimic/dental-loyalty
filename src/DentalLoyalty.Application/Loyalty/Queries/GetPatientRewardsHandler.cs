@@ -91,19 +91,7 @@ public sealed class GetPatientRewardsHandler
 
         var rewards = await _rewardRepository.ListForTenantAsync(clinicId, cancellationToken);
 
-        var results = rewards
-            .Where(r => r.IsActive || redeemedRewardIds.Contains(r.Id))
-            .OrderBy(r => r.RequiredPoints)
-            .ThenBy(r => r.RequiredReferrals)
-            .ThenBy(r => r.Name)
-            .Select(r => new PatientRewardResult(
-                r.Id,
-                r.Name,
-                r.Description,
-                r.RequiredPoints,
-                r.RequiredReferrals,
-                r.StatusFor(account, activeCycle, redeemedRewardIds.Contains(r.Id), now)))
-            .ToList();
+        var results = PatientRewardStatuses.Evaluate(rewards, account, activeCycle, redeemedRewardIds, now);
 
         return new PatientRewardsResult(account.Points, account.ReferralBalance, results);
     }
