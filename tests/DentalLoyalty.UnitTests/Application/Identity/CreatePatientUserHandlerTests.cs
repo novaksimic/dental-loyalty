@@ -7,165 +7,222 @@ using Xunit;
 
 namespace DentalLoyalty.UnitTests.Application.Identity;
 
+// ADR-010 decision 2: a ClinicAdmin creates the user account of a patient of
+// their own clinic; the link starts the first loyalty cycle (BUSINESS.md §5.1).
 public class CreatePatientUserHandlerTests
 {
-    [Fact]
-    public async Task HandleAsync_LinksCreatedUser_ToExistingPatient()
+    private const string ValidPassword = "Sup3rSecret!pass";
+
+    private readonly Guid _clinicId = Guid.NewGuid();
+    private readonly InMemoryUserRepository _userRepository = new();
+    private readonly InMemoryPatientRepository _patientRepository;
+    private readonly PasswordHasher _passwordHasher = new();
+
+    public CreatePatientUserHandlerTests()
     {
-        var clinicId = Guid.NewGuid();
-        var patient = new Patient(clinicId, "Jane", "Doe", "+381601234567");
+        _patientRepository = new InMemoryPatientRepository(_userRepository);
+    }
 
-        var patientRepository = new InMemoryPatientRepository();
-        patientRepository.Seed(patient);
+    private CreatePatientUserHandler CreateHandler(FakeCurrentTenant? tenant = null) =>
+        new(_userRepository, _patientRepository, _passwordHasher, tenant ?? FakeCurrentTenant.ForClinic(_clinicId));
 
-        var userRepository = new InMemoryUserRepository();
-        var passwordHasher = new PasswordHasher();
+    private Patient SeedPatient(Guid? clinicId = null)
+    {
+        var patient = new Patient(clinicId ?? _clinicId, "Jane", "Doe", "+381601234567");
+        _patientRepository.Seed(patient);
+        return patient;
+    }
 
-        var handler = new CreatePatientUserHandler(
-            userRepository,
-            patientRepository,
-            passwordHasher);
+    private static CreatePatientUserCommand Command(Guid patientId, string? email = "jane@patient.test", string? password = ValidPassword) =>
+        new(patientId, email!, password!);
 
-        var userId = await handler.HandleAsync(
-            new CreatePatientUserCommand(patient.Id, "jane@patient.test", "Sup3rSecret!"));
+    private void AssertNothingCreated(Patient? patient = null, string email = "jane@patient.test")
+    {
+        Assert.Empty(_patientRepository.LinkedUsers);
+        Assert.Empty(_patientRepository.LoyaltyCycles);
+        Assert.Null(_userRepository.GetByEmailAsync(email).Result);
 
-        var updatedPatient = await patientRepository.GetByIdAsync(patient.Id);
-
-        Assert.NotNull(updatedPatient);
-        Assert.Equal(userId, updatedPatient!.UserId);
+        if (patient is not null)
+        {
+            Assert.Null(patient.UserId);
+        }
     }
 
     [Fact]
-    public async Task HandleAsync_WithUnknownPatient_ThrowsInvalidOperationException()
+    public async Task LinksCreatedUser_ToThePatient()
     {
-        var handler = new CreatePatientUserHandler(
-            new InMemoryUserRepository(),
-            new InMemoryPatientRepository(),
-            new PasswordHasher());
+        var patient = SeedPatient();
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            handler.HandleAsync(
-                new CreatePatientUserCommand(Guid.NewGuid(), "jane@patient.test", "Sup3rSecret!")));
+        var result = await CreateHandler().HandleAsync(Command(patient.Id));
+
+        Assert.Equal(CreatePatientUserStatus.Created, result.Status);
+        Assert.Equal(result.UserId, patient.UserId);
     }
 
-    // BUSINESS.md §5.1: the first cycle starts at the moment registration and
-    // account linking are completed, saved in the same operation as the link.
+    // BUSINESS.md §5.1: the first cycle starts at the moment the account is
+    // linked, saved in the same operation as the link.
     [Fact]
-    public async Task HandleAsync_FirstLink_StartsTheFirstLoyaltyCycle_WithTheUserAndLink()
+    public async Task CreatesPatientUser_OfThePatientsClinic_AndStartsTheFirstCycle()
     {
-        var clinicId = Guid.NewGuid();
-        var patient = new Patient(clinicId, "Jane", "Doe", "+381601234567");
+        var patient = SeedPatient();
 
-        var userRepository = new InMemoryUserRepository();
-        var patientRepository = new InMemoryPatientRepository(userRepository);
-        patientRepository.Seed(patient);
+        var result = await CreateHandler().HandleAsync(Command(patient.Id));
 
-        var handler = new CreatePatientUserHandler(userRepository, patientRepository, new PasswordHasher());
-
-        var userId = await handler.HandleAsync(
-            new CreatePatientUserCommand(patient.Id, "jane@patient.test", "Sup3rSecret!"));
-
-        var user = Assert.Single(patientRepository.LinkedUsers);
-        Assert.Equal(userId, user.Id);
-        Assert.Equal(clinicId, user.ClinicId);
+        var user = Assert.Single(_patientRepository.LinkedUsers);
+        Assert.Equal(result.UserId, user.Id);
+        Assert.Equal(_clinicId, user.ClinicId);
         Assert.Equal(UserRole.Patient, user.Role);
+        Assert.True(user.IsActive);
 
-        var cycle = Assert.Single(patientRepository.LoyaltyCycles);
+        var cycle = Assert.Single(_patientRepository.LoyaltyCycles);
         Assert.Equal(patient.Id, cycle.PatientId);
-        Assert.Equal(clinicId, cycle.ClinicId);
+        Assert.Equal(_clinicId, cycle.ClinicId);
         Assert.Equal(LoyaltyCycleStatus.Active, cycle.Status);
+    }
+
+    [Fact]
+    public async Task StoresNormalizedEmail_AndHashedPassword()
+    {
+        var patient = SeedPatient();
+
+        var result = await CreateHandler().HandleAsync(Command(patient.Id, "  Jane.Doe@Patient.TEST "));
+
+        var user = Assert.Single(_patientRepository.LinkedUsers);
+        Assert.Equal("jane.doe@patient.test", user.Email);
+        Assert.Equal("jane.doe@patient.test", result.Email);
+        Assert.NotEqual(ValidPassword, user.PasswordHash);
+        Assert.DoesNotContain(ValidPassword, user.PasswordHash);
+        Assert.True(_passwordHasher.Verify(ValidPassword, user.PasswordHash));
+    }
+
+    [Fact]
+    public async Task UnknownPatient_IsRejected_AndCreatesNothing()
+    {
+        var result = await CreateHandler().HandleAsync(Command(Guid.NewGuid()));
+
+        Assert.Equal(CreatePatientUserStatus.PatientNotFound, result.Status);
+        AssertNothingCreated();
+    }
+
+    // The tenant boundary: a patient of another clinic is indistinguishable from
+    // none, and is left untouched.
+    [Fact]
+    public async Task PatientOfAnotherClinic_IsNotFound_AndCreatesNothing()
+    {
+        var foreign = SeedPatient(Guid.NewGuid());
+
+        var result = await CreateHandler().HandleAsync(Command(foreign.Id));
+
+        Assert.Equal(CreatePatientUserStatus.PatientNotFound, result.Status);
+        AssertNothingCreated(foreign);
+    }
+
+    // Fails closed: a caller without a trusted tenant (e.g. a PlatformAdmin
+    // token) reaches no patient.
+    [Fact]
+    public async Task WithoutTenant_IsNotFound_AndCreatesNothing()
+    {
+        var patient = SeedPatient();
+
+        var result = await CreateHandler(FakeCurrentTenant.NoTenant()).HandleAsync(Command(patient.Id));
+
+        Assert.Equal(CreatePatientUserStatus.PatientNotFound, result.Status);
+        AssertNothingCreated(patient);
+    }
+
+    [Fact]
+    public async Task InactivePatient_IsRejected_AndCreatesNothing()
+    {
+        var patient = SeedPatient();
+        patient.Deactivate();
+
+        var result = await CreateHandler().HandleAsync(Command(patient.Id));
+
+        Assert.Equal(CreatePatientUserStatus.PatientInactive, result.Status);
+        AssertNothingCreated(patient);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not-an-email")]
+    [InlineData("jane@localhost")]
+    public async Task InvalidEmail_IsRejected_AndCreatesNothing(string? email)
+    {
+        var patient = SeedPatient();
+
+        var result = await CreateHandler().HandleAsync(Command(patient.Id, email));
+
+        Assert.Equal(CreatePatientUserStatus.InvalidEmail, result.Status);
+        AssertNothingCreated(patient);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("short")]
+    [InlineData("JANE@patient.test")]
+    public async Task InvalidPassword_IsRejected_AndCreatesNothing(string? password)
+    {
+        var patient = SeedPatient();
+
+        var result = await CreateHandler().HandleAsync(Command(patient.Id, password: password));
+
+        Assert.Equal(CreatePatientUserStatus.InvalidPassword, result.Status);
+        AssertNothingCreated(patient);
     }
 
     // An existing link is never handed over to another User: the attempt is
     // rejected before any User is created, and the link and cycle stay as they are.
     [Fact]
-    public async Task HandleAsync_PatientAlreadyLinkedToAnotherUser_IsRejected_AndNothingChanges()
+    public async Task PatientAlreadyLinkedToAnotherUser_IsRejected_AndNothingChanges()
     {
-        var clinicId = Guid.NewGuid();
         var existingUserId = Guid.NewGuid();
-        var patient = new Patient(clinicId, "Jane", "Doe", "+381601234567");
+        var patient = SeedPatient();
         patient.LinkUser(existingUserId);
         var updatedAt = patient.UpdatedAt;
 
-        var userRepository = new InMemoryUserRepository();
-        var patientRepository = new InMemoryPatientRepository(userRepository);
-        patientRepository.Seed(patient);
+        var result = await CreateHandler().HandleAsync(Command(patient.Id, "intruder@patient.test"));
 
-        var handler = new CreatePatientUserHandler(userRepository, patientRepository, new PasswordHasher());
-
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            handler.HandleAsync(
-                new CreatePatientUserCommand(patient.Id, "intruder@patient.test", "Sup3rSecret!")));
-
+        Assert.Equal(CreatePatientUserStatus.AlreadyLinked, result.Status);
         Assert.Equal(existingUserId, patient.UserId);
         Assert.Equal(updatedAt, patient.UpdatedAt);
-        Assert.Empty(patientRepository.LinkedUsers);
-        Assert.Empty(patientRepository.LoyaltyCycles);
-        Assert.Null(await userRepository.GetByEmailAsync("intruder@patient.test"));
+        Assert.Empty(_patientRepository.LinkedUsers);
+        Assert.Empty(_patientRepository.LoyaltyCycles);
+        Assert.Null(await _userRepository.GetByEmailAsync("intruder@patient.test"));
     }
 
-    // Repeating a successful registration for the same User creates no second
-    // User and no second cycle, and leaves the link unchanged.
+    // Repeating a successful request creates no second User and no second cycle,
+    // and leaves the link unchanged.
     [Fact]
-    public async Task HandleAsync_RepeatedForTheSameUserAfterSuccess_IsRejected_AndNothingChanges()
+    public async Task RepeatedAfterSuccess_IsRejected_AndNothingChanges()
     {
-        var clinicId = Guid.NewGuid();
-        var patient = new Patient(clinicId, "Jane", "Doe", "+381601234567");
+        var patient = SeedPatient();
+        var handler = CreateHandler();
 
-        var userRepository = new InMemoryUserRepository();
-        var patientRepository = new InMemoryPatientRepository(userRepository);
-        patientRepository.Seed(patient);
+        var first = await handler.HandleAsync(Command(patient.Id));
+        var cycle = Assert.Single(_patientRepository.LoyaltyCycles);
 
-        var handler = new CreatePatientUserHandler(userRepository, patientRepository, new PasswordHasher());
-        var command = new CreatePatientUserCommand(patient.Id, "jane@patient.test", "Sup3rSecret!");
+        var second = await handler.HandleAsync(Command(patient.Id));
 
-        var userId = await handler.HandleAsync(command);
-        var cycle = Assert.Single(patientRepository.LoyaltyCycles);
-
-        await Assert.ThrowsAsync<InvalidOperationException>(() => handler.HandleAsync(command));
-
-        Assert.Equal(userId, patient.UserId);
-        Assert.Equal(userId, Assert.Single(patientRepository.LinkedUsers).Id);
-        Assert.Same(cycle, Assert.Single(patientRepository.LoyaltyCycles));
+        Assert.Equal(CreatePatientUserStatus.AlreadyLinked, second.Status);
+        Assert.Equal(first.UserId, patient.UserId);
+        Assert.Equal(first.UserId, Assert.Single(_patientRepository.LinkedUsers).Id);
+        Assert.Same(cycle, Assert.Single(_patientRepository.LoyaltyCycles));
     }
 
-    [Fact]
-    public async Task HandleAsync_WithUnknownPatient_SavesNoUserAndStartsNoCycle()
+    [Theory]
+    [InlineData("jane@patient.test")]
+    [InlineData("JANE@Patient.Test")]
+    public async Task EmailAlreadyInUse_InAnyCasing_LeavesPatientUnlinked(string email)
     {
-        var userRepository = new InMemoryUserRepository();
-        var patientRepository = new InMemoryPatientRepository(userRepository);
+        var patient = SeedPatient();
+        await _userRepository.AddAsync(new User(Guid.NewGuid(), "jane@patient.test", "existing-hash", UserRole.ClinicAdmin));
 
-        var handler = new CreatePatientUserHandler(userRepository, patientRepository, new PasswordHasher());
+        var result = await CreateHandler().HandleAsync(Command(patient.Id, email));
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            handler.HandleAsync(
-                new CreatePatientUserCommand(Guid.NewGuid(), "jane@patient.test", "Sup3rSecret!")));
-
-        Assert.Empty(patientRepository.LinkedUsers);
-        Assert.Empty(patientRepository.LoyaltyCycles);
-        Assert.Null(await userRepository.GetByEmailAsync("jane@patient.test"));
-    }
-
-    [Fact]
-    public async Task HandleAsync_WithEmailAlreadyInUse_LeavesPatientUnlinkedAndStartsNoCycle()
-    {
-        var clinicId = Guid.NewGuid();
-        var patient = new Patient(clinicId, "Jane", "Doe", "+381601234567");
-
-        var userRepository = new InMemoryUserRepository();
-        await userRepository.AddAsync(new User(clinicId, "jane@patient.test", "existing-hash", UserRole.Patient));
-
-        var patientRepository = new InMemoryPatientRepository(userRepository);
-        patientRepository.Seed(patient);
-
-        var handler = new CreatePatientUserHandler(userRepository, patientRepository, new PasswordHasher());
-
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            handler.HandleAsync(
-                new CreatePatientUserCommand(patient.Id, "jane@patient.test", "Sup3rSecret!")));
-
+        Assert.Equal(CreatePatientUserStatus.EmailAlreadyExists, result.Status);
         Assert.Null(patient.UserId);
-        Assert.Empty(patientRepository.LinkedUsers);
-        Assert.Empty(patientRepository.LoyaltyCycles);
+        Assert.Empty(_patientRepository.LinkedUsers);
+        Assert.Empty(_patientRepository.LoyaltyCycles);
     }
 }

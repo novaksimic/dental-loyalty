@@ -1,4 +1,5 @@
 using DentalLoyalty.Application.Common.Interfaces;
+using DentalLoyalty.Domain.Enums;
 
 namespace DentalLoyalty.Application.Identity.Commands;
 
@@ -7,20 +8,23 @@ public sealed class LoginHandler
     private readonly IUserRepository _userRepository;
     private readonly IPasswordHasher _passwordHasher;
     private readonly IJwtTokenGenerator _jwtTokenGenerator;
+    private readonly IPatientRepository _patientRepository;
 
     public LoginHandler(
         IUserRepository userRepository,
         IPasswordHasher passwordHasher,
-        IJwtTokenGenerator jwtTokenGenerator)
+        IJwtTokenGenerator jwtTokenGenerator,
+        IPatientRepository patientRepository)
     {
         _userRepository = userRepository;
         _passwordHasher = passwordHasher;
         _jwtTokenGenerator = jwtTokenGenerator;
+        _patientRepository = patientRepository;
     }
 
     // Returns null for every rejection reason (unknown email, wrong password,
-    // inactive user) so the caller cannot distinguish "no such user" from
-    // "wrong password" from the response alone.
+    // inactive user, deactivated patient) so the caller cannot distinguish "no
+    // such user" from "wrong password" from the response alone.
     public async Task<LoginResponse?> HandleAsync(
         LoginCommand command,
         CancellationToken cancellationToken = default)
@@ -49,6 +53,24 @@ public sealed class LoginHandler
         if (!user.IsActive)
         {
             return null;
+        }
+
+        // A patient's access follows their Patient record: deactivating the
+        // patient (DELETE /api/patients/{id}) deactivates only that record, so
+        // the linked account is refused here. Checked after the password, like
+        // the user's own status, so it reveals nothing to someone without it.
+        // Other roles have no Patient record and are unaffected.
+        if (user.Role == UserRole.Patient && user.ClinicId is Guid clinicId)
+        {
+            var patient = await _patientRepository.GetByUserIdForTenantAsync(
+                user.Id,
+                clinicId,
+                cancellationToken);
+
+            if (patient is { IsActive: false })
+            {
+                return null;
+            }
         }
 
         var token = _jwtTokenGenerator.GenerateToken(

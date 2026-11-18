@@ -1,4 +1,5 @@
 using DentalLoyalty.Api.Bootstrap;
+using DentalLoyalty.Api.Configuration;
 using DentalLoyalty.Api.Security;
 using DentalLoyalty.Application.Common.Interfaces;
 using DentalLoyalty.Infrastructure;
@@ -16,6 +17,10 @@ builder.Services.AddScoped<ICurrentTenant, CurrentTenant>();
 builder.Services.AddScoped<ICurrentUser, CurrentUser>();
 
 builder.Services.AddControllers();
+
+// ProblemDetails errors, the exception handler, CORS, the login rate limit and
+// trusted forwarded headers - all from validated configuration.
+builder.Services.AddApiHardening(builder.Configuration);
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
@@ -43,6 +48,27 @@ builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
+// Fail fast on invalid Jwt, Cors, RateLimiting or ForwardedHeaders settings,
+// before anything else runs.
+app.ValidateApiConfiguration();
+
+// Middleware order matters (SECURITY.md §10.7, §16, §17):
+//  1. Forwarded headers first, so everything after sees the real client address
+//     and scheme - and only when trusted proxies are configured.
+//  2. The exception handler and status code pages wrap everything below, so
+//     every error leaves as ProblemDetails.
+//  3. CORS after routing and before authentication, so preflight requests are
+//     answered without a token.
+//  4. The rate limiter after routing (its policy is chosen per endpoint) and
+//     before authentication, so rejected logins do no further work.
+if (app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<ForwardedHeadersSettings>>().Value.IsEnabled)
+{
+    app.UseForwardedHeaders();
+}
+
+app.UseExceptionHandler();
+app.UseStatusCodePages();
+
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
@@ -52,6 +78,12 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+
+app.UseRouting();
+
+app.UseCors(CorsSettings.PolicyName);
+
+app.UseRateLimiter();
 
 app.UseAuthentication();
 app.UseAuthorization();

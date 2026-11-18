@@ -4,6 +4,11 @@ namespace DentalLoyalty.Domain.Entities;
 
 public class Reward
 {
+    // Rewards.Name and Rewards.Description column lengths (RewardConfiguration).
+    public const int MaximumNameLength = 200;
+
+    public const int MaximumDescriptionLength = 1000;
+
     public Guid Id { get; private set; }
 
     public Guid ClinicId { get; private set; }
@@ -39,7 +44,7 @@ public class Reward
             throw new ArgumentException("ClinicId is required.", nameof(clinicId));
         }
 
-        Validate(name, requiredPoints, requiredReferrals);
+        Validate(name, requiredPoints, requiredReferrals, description);
 
         Id = Guid.NewGuid();
         ClinicId = clinicId;
@@ -57,7 +62,7 @@ public class Reward
         int requiredReferrals,
         string? description)
     {
-        Validate(name, requiredPoints, requiredReferrals);
+        Validate(name, requiredPoints, requiredReferrals, description);
 
         Name = name;
         RequiredPoints = requiredPoints;
@@ -127,11 +132,26 @@ public class Reward
     private static void Validate(
         string name,
         int requiredPoints,
-        int requiredReferrals)
+        int requiredReferrals,
+        string? description)
     {
         if (string.IsNullOrWhiteSpace(name))
         {
             throw new ArgumentException("Reward name is required.", nameof(name));
+        }
+
+        if (name.Length > MaximumNameLength)
+        {
+            throw new ArgumentException(
+                $"Reward name can be at most {MaximumNameLength} characters.",
+                nameof(name));
+        }
+
+        if (description is not null && description.Length > MaximumDescriptionLength)
+        {
+            throw new ArgumentException(
+                $"Reward description can be at most {MaximumDescriptionLength} characters.",
+                nameof(description));
         }
 
         if (requiredPoints < 0 || requiredPoints > LoyaltyAccount.MaximumPointsBalance)

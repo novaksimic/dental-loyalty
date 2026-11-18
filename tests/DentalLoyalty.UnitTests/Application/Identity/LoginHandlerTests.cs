@@ -20,12 +20,15 @@ public class LoginHandlerTests
         AccessTokenLifetimeMinutes = 60,
     };
 
-    private static LoginHandler CreateHandler(InMemoryUserRepository userRepository)
+    private static LoginHandler CreateHandler(
+        InMemoryUserRepository userRepository,
+        InMemoryPatientRepository? patientRepository = null)
     {
         return new LoginHandler(
             userRepository,
             new PasswordHasher(),
-            new JwtTokenGenerator(Options.Create(JwtOptions)));
+            new JwtTokenGenerator(Options.Create(JwtOptions)),
+            patientRepository ?? new InMemoryPatientRepository(userRepository));
     }
 
     [Fact]
@@ -43,6 +46,53 @@ public class LoginHandlerTests
         Assert.NotNull(result);
         Assert.False(string.IsNullOrWhiteSpace(result!.Token));
         Assert.Equal(user.Id, result.UserId);
+    }
+
+    // ADR-010 decision 4: accounts created through the API are stored
+    // lower-cased, so any casing of the email signs in.
+    [Theory]
+    [InlineData("ana@patient.test")]
+    [InlineData("ANA@Patient.TEST")]
+    [InlineData("  Ana@patient.test  ")]
+    public async Task HandleAsync_LowerCaseAccount_SignsInWithAnyCasing(string typed)
+    {
+        var passwordHasher = new PasswordHasher();
+        var userRepository = new InMemoryUserRepository();
+        var user = new User(Guid.NewGuid(), "ana@patient.test", passwordHasher.Hash("Sup3rSecret!"), UserRole.Patient);
+        await userRepository.AddAsync(user);
+
+        var result = await CreateHandler(userRepository).HandleAsync(new LoginCommand(typed, "Sup3rSecret!"));
+
+        Assert.Equal(user.Id, result?.UserId);
+    }
+
+    // An existing account stored in mixed case keeps signing in as typed today.
+    [Theory]
+    [InlineData("Ana.Admin@Platform.test")]
+    [InlineData("  Ana.Admin@Platform.test  ")]
+    public async Task HandleAsync_MixedCaseAccount_SignsInWithItsStoredCasing(string typed)
+    {
+        var passwordHasher = new PasswordHasher();
+        var userRepository = new InMemoryUserRepository();
+        var user = new User(null, "Ana.Admin@Platform.test", passwordHasher.Hash("Sup3rSecret!"), UserRole.PlatformAdmin);
+        await userRepository.AddAsync(user);
+
+        var result = await CreateHandler(userRepository).HandleAsync(new LoginCommand(typed, "Sup3rSecret!"));
+
+        Assert.Equal(user.Id, result?.UserId);
+    }
+
+    // Known compatibility limitation (ADR-010 decision 7): on a case-sensitive store an
+    // existing mixed-case account is not found with a different casing.
+    // SQL Server's collation does find it (SqlServerUserEmailCollationTests).
+    [Fact]
+    public async Task HandleAsync_MixedCaseAccount_DifferentCasing_IsNotFoundOnACaseSensitiveStore()
+    {
+        var passwordHasher = new PasswordHasher();
+        var userRepository = new InMemoryUserRepository();
+        await userRepository.AddAsync(new User(null, "Ana.Admin@Platform.test", passwordHasher.Hash("Sup3rSecret!"), UserRole.PlatformAdmin));
+
+        Assert.Null(await CreateHandler(userRepository).HandleAsync(new LoginCommand("ana.admin@platform.test", "Sup3rSecret!")));
     }
 
     [Fact]
@@ -142,5 +192,79 @@ public class LoginHandlerTests
         Assert.NotNull(result);
         Assert.Equal(nameof(UserRole.Patient), result!.Role);
         Assert.Equal(clinicId, result.ClinicId);
+    }
+
+    // --- Patient record status ---------------------------------------------
+
+    private static async Task<(InMemoryUserRepository Users, InMemoryPatientRepository Patients, Patient Patient)> SeedLinkedPatientAsync(
+        bool patientActive)
+    {
+        var clinicId = Guid.NewGuid();
+        var userRepository = new InMemoryUserRepository();
+        var patientRepository = new InMemoryPatientRepository(userRepository);
+        var user = new User(clinicId, "patient@clinic.test", new PasswordHasher().Hash("Sup3rSecret!"), UserRole.Patient);
+        var patient = new Patient(clinicId, "Ana", "Petrovic", "+381600000000");
+        patient.LinkUser(user.Id);
+
+        if (!patientActive)
+        {
+            patient.Deactivate();
+        }
+
+        await userRepository.AddAsync(user);
+        patientRepository.Seed(patient);
+
+        return (userRepository, patientRepository, patient);
+    }
+
+    [Fact]
+    public async Task HandleAsync_PatientWithActiveRecord_SignsIn()
+    {
+        var (users, patients, _) = await SeedLinkedPatientAsync(patientActive: true);
+
+        var result = await CreateHandler(users, patients).HandleAsync(new LoginCommand("patient@clinic.test", "Sup3rSecret!"));
+
+        Assert.NotNull(result);
+        Assert.Equal(nameof(UserRole.Patient), result!.Role);
+    }
+
+    // A deactivated patient's still-active user account is refused, with the
+    // same null as every other rejection.
+    [Fact]
+    public async Task HandleAsync_PatientWithDeactivatedRecord_ReturnsNull()
+    {
+        var (users, patients, _) = await SeedLinkedPatientAsync(patientActive: false);
+
+        Assert.Null(await CreateHandler(users, patients).HandleAsync(new LoginCommand("patient@clinic.test", "Sup3rSecret!")));
+    }
+
+    // Reactivating the record restores access.
+    [Fact]
+    public async Task HandleAsync_PatientRecordReactivated_SignsInAgain()
+    {
+        var (users, patients, patient) = await SeedLinkedPatientAsync(patientActive: false);
+        patient.Activate();
+
+        Assert.NotNull(await CreateHandler(users, patients).HandleAsync(new LoginCommand("patient@clinic.test", "Sup3rSecret!")));
+    }
+
+    // The patient check never runs for a wrong password, so it reveals nothing.
+    [Fact]
+    public async Task HandleAsync_DeactivatedPatient_WrongPassword_ReturnsNull()
+    {
+        var (users, patients, _) = await SeedLinkedPatientAsync(patientActive: false);
+
+        Assert.Null(await CreateHandler(users, patients).HandleAsync(new LoginCommand("patient@clinic.test", "WrongPassword!")));
+    }
+
+    // Admin roles have no Patient record; a deactivated patient of their clinic
+    // does not affect them.
+    [Fact]
+    public async Task HandleAsync_ClinicAdmin_IsUnaffectedByPatientRecords()
+    {
+        var (users, patients, patient) = await SeedLinkedPatientAsync(patientActive: false);
+        await users.AddAsync(new User(patient.ClinicId, "admin@clinic.test", new PasswordHasher().Hash("Sup3rSecret!"), UserRole.ClinicAdmin));
+
+        Assert.NotNull(await CreateHandler(users, patients).HandleAsync(new LoginCommand("admin@clinic.test", "Sup3rSecret!")));
     }
 }

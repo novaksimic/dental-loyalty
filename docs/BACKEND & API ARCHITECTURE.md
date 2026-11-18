@@ -202,6 +202,8 @@ Loyalty transactions are separate domain records and should not be replaced by g
 
 The backend will expose a RESTful HTTP API for the Patient Application and Admin Application.
 
+> **Implemented API.** The routes in this section are illustrative. The API as built uses `/api/...` with no version segment, and its business operations use noun sub-resources: for example `POST /api/patients/{id}/rewards/{rewardId}/redemptions` rather than `/rewards/{id}/redeem`. `API.md` is the reference for the implemented routes, DTOs, validation and status codes.
+
 The API will use versioning:
 
 ```text
@@ -1510,6 +1512,8 @@ GET /api/v1/patients?sortBy=createdAt&sortDirection=desc
 ```
 
 The API should protect itself against unreasonable page sizes.
+
+> **Implemented.** `GET /api/patients` supports `page` (default 1), `pageSize` (default 20, maximum 100; out-of-range values return `400`), `search` and `isActive`, and is ordered by name. Sorting parameters are not implemented. The loyalty transactions endpoint pages the same way. See `API.md` §1.5.
 
 The MVP should implement only filtering, sorting, and pagination that provide concrete business value.
 

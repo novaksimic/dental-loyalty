@@ -1,4 +1,5 @@
 using DentalLoyalty.Application.Common.Exceptions;
+using DentalLoyalty.Application.Common.Paging;
 using DentalLoyalty.Application.Loyalty.Commands;
 using DentalLoyalty.Application.Loyalty.Queries;
 using DentalLoyalty.Application.Patients.Commands;
@@ -55,6 +56,7 @@ public class PatientsController : ControllerBase
     private readonly RecordPatientServiceHandler _recordPatientServiceHandler;
     private readonly GetPatientRewardsHandler _getPatientRewardsHandler;
     private readonly RedeemRewardHandler _redeemRewardHandler;
+    private readonly GetPatientsHandler _getPatientsHandler;
 
     public PatientsController(
         CreatePatientHandler createPatientHandler,
@@ -64,7 +66,8 @@ public class PatientsController : ControllerBase
         DeactivatePatientHandler deactivatePatientHandler,
         RecordPatientServiceHandler recordPatientServiceHandler,
         GetPatientRewardsHandler getPatientRewardsHandler,
-        RedeemRewardHandler redeemRewardHandler)
+        RedeemRewardHandler redeemRewardHandler,
+        GetPatientsHandler getPatientsHandler)
     {
         _createPatientHandler = createPatientHandler;
         _getPatientByIdHandler = getPatientByIdHandler;
@@ -74,6 +77,58 @@ public class PatientsController : ControllerBase
         _recordPatientServiceHandler = recordPatientServiceHandler;
         _getPatientRewardsHandler = getPatientRewardsHandler;
         _redeemRewardHandler = redeemRewardHandler;
+        _getPatientsHandler = getPatientsHandler;
+    }
+
+    // The ClinicAdmin's patient list: one page of their own clinic's patients,
+    // searched and filtered in the database. Takes no clinic: it is the caller's
+    // tenant. PlatformAdmin is not granted it (SECURITY.md §7.12), like the
+    // other patient-data reads.
+    [HttpGet]
+    [Authorize(Roles = nameof(UserRole.ClinicAdmin))]
+    [ProducesResponseType<PagedResult<PatientListItemDto>>(StatusCodes.Status200OK)]
+    public async Task<IActionResult> List(
+        [FromQuery] string? search,
+        [FromQuery] bool? isActive,
+        [FromQuery] int page = GetPatientsQuery.DefaultPage,
+        [FromQuery] int pageSize = GetPatientsQuery.DefaultPageSize,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await _getPatientsHandler.HandleAsync(
+            new GetPatientsQuery(search, isActive, page, pageSize),
+            cancellationToken);
+
+        switch (result.Status)
+        {
+            case GetPatientsStatus.Found:
+                return Ok(result.Patients);
+
+            case GetPatientsStatus.InvalidPaging:
+                if (page < 1)
+                {
+                    ModelState.AddModelError(nameof(page), "page must be at least 1.");
+                }
+                else if (pageSize < 1 || pageSize > GetPatientsQuery.MaximumPageSize)
+                {
+                    ModelState.AddModelError(nameof(pageSize), $"pageSize must be between 1 and {GetPatientsQuery.MaximumPageSize}.");
+                }
+                else
+                {
+                    ModelState.AddModelError(nameof(page), "page is beyond the range that can be listed.");
+                }
+
+                return ValidationProblem(ModelState);
+
+            case GetPatientsStatus.InvalidSearch:
+                ModelState.AddModelError(nameof(search), $"search can be at most {GetPatientsQuery.MaximumSearchLength} characters.");
+                return ValidationProblem(ModelState);
+
+            case GetPatientsStatus.NoTenant:
+                return Forbid();
+
+            default:
+                throw new InvalidOperationException($"Unexpected result {result.Status}.");
+        }
     }
 
     [HttpPost]

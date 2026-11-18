@@ -46,4 +46,46 @@ public sealed class RewardRepository : IRewardRepository
 
         return rewardIds.ToHashSet();
     }
+
+    public async Task<IReadOnlyList<Reward>> ListDefinitionsForTenantAsync(
+        Guid clinicId,
+        bool? isActive,
+        CancellationToken cancellationToken = default)
+    {
+        var rewards = _context.Rewards
+            .AsNoTracking()
+            .Where(r => r.ClinicId == clinicId);
+
+        if (isActive is bool active)
+        {
+            rewards = rewards.Where(r => r.IsActive == active);
+        }
+
+        return await rewards
+            .OrderBy(r => r.RequiredPoints)
+            .ThenBy(r => r.RequiredReferrals)
+            .ThenBy(r => r.Name)
+            .ThenBy(r => r.Id)
+            .ToListAsync(cancellationToken);
+    }
+
+    public async Task AddAsync(
+        Reward reward,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(reward);
+
+        await _context.Rewards.AddAsync(reward, cancellationToken);
+        await _context.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task UpdateAsync(
+        Reward reward,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(reward);
+
+        _context.Rewards.Update(reward);
+        await _context.SaveChangesAsync(cancellationToken);
+    }
 }

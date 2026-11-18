@@ -18,4 +18,7 @@ public sealed class InMemoryClinicRepository : IClinicRepository
         LoyaltyConfigurations.Add(loyaltyConfiguration);
         return Task.CompletedTask;
     }
+
+    public Task<bool> ExistsAsync(Guid id, CancellationToken cancellationToken = default) =>
+        Task.FromResult(Clinics.Any(c => c.Id == id));
 }

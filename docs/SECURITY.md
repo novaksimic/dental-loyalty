@@ -50,6 +50,17 @@ Authentication must remain separate from authorization.
 
 > A successfully authenticated user is not automatically authorized to access every resource.
 
+### 2.1 Account Provisioning
+
+Accounts are created by administrators only; there is no self-registration. The model is defined in `ADR/010-administrator-provisioned-accounts.md`, which supersedes ADR-009.
+
+- **ClinicAdmin accounts** are created only by a PlatformAdmin (`POST /api/clinics/{clinicId}/admins`) for an existing clinic. The clinic comes from the route, never the request body.
+- **Patient accounts** are created by a ClinicAdmin of the patient's clinic and linked to the patient's Patient record. The clinic is always the ClinicAdmin's own tenant, never a client-supplied value.
+- **No public account endpoints:** no registration endpoint, no pending accounts, no verification codes.
+- **Emails** are trimmed and lower-cased before they are stored or looked up, and are unique platform-wide. Because only authenticated administrators create accounts, a duplicate email is reported (`409 Conflict`).
+- **Passwords** follow §8.3, are hashed before storage, and are never returned or logged.
+- **Before production:** login rate limiting (§16), password change/reset (§8.4), and email verification for any flow that relies on the email address.
+
 ---
 
 ## 3. Authorization
@@ -202,6 +213,7 @@ Patient may not:
 | Manage Points | Platform | Own Clinic | No |
 | Manage Referrals | Platform | Own Clinic | Own only |
 | Manage Rewards | Platform | Own Clinic | Own only |
+| Manage Services | Not granted (§5.5) | Own Clinic | No |
 | Redeem Reward | Platform | Own Clinic | No |
 | Loyalty Configuration | Platform | Own Clinic | No |
 | View Analytics | Platform | Own Clinic | No |
@@ -213,6 +225,45 @@ Role authorization never bypasses tenant isolation.
 Authorization must always be enforced server-side.
 
 The frontend may hide unavailable functionality, but the frontend is not a security boundary.
+
+### 5.5 Implemented API Authorization
+
+The matrix above states what each role may be granted. The API currently grants less. The routes are listed in `API.md`, and every route's allowed roles are pinned by `EndpointAuthorizationInventoryTests`.
+
+**PlatformAdmin is granted only platform operations:**
+
+- creating clinics;
+- creating a clinic's ClinicAdmin accounts;
+- creating patient records.
+
+It is **not** granted any clinic-scoped endpoint: patient list and reads, patient accounts, services, rewards, redemptions, referrals, loyalty configuration or loyalty history.
+
+- §7.12 requires PlatformAdmin access to patient data to be explicitly defined and auditable, and neither exists yet.
+- A PlatformAdmin token carries no clinic.
+- The matrix's "Platform" entries are therefore not implemented. Granting any of them needs an explicit decision and audit logging (§7.12).
+
+**The clinic comes from the token.** Every clinic-scoped endpoint is ClinicAdmin-only and acts on the caller's own clinic, taken from the token's `clinicId` claim.
+
+- A clinic id in the request is never used. A resource of another clinic answers `404`, exactly like a missing one.
+- A ClinicAdmin token without a clinic reaches nothing: lists and creation answer `403`, and id-based operations answer `404`.
+
+| Area | PlatformAdmin | ClinicAdmin | Patient |
+|---|---|---|---|
+| Clinics, ClinicAdmin accounts | Create | No | No |
+| Patient records: create | Any clinic (named in the request) | Own clinic | No |
+| Patient list (search, filter, paging), read, update, deactivate | No | Own clinic | Own record (`/me`) |
+| Patient account (create and link) | No | Own clinic | No |
+| Services: list, read, create, update, activate, deactivate | No | Own clinic | No |
+| Reward definitions: list, read, create, update, activate, deactivate | No | Own clinic | No |
+| Patient rewards view, redemption | No | Own clinic | No |
+| Referrals: record, validate | No | Own clinic | No |
+| Loyalty configuration | No | Own clinic | No |
+| Loyalty history and transactions | No | Own clinic | Own (`/me`) |
+
+**Not implemented for patients:**
+
+- the "Own only" referral and reward rows of the matrix (patient self-service referrals, and a patient's own rewards view outside loyalty history);
+- a patient-facing list of active services (`BUSINESS.md` §15).
 
 ---
 
@@ -526,7 +577,7 @@ The system must never store:
 
 The application should enforce reasonable password requirements.
 
-The exact policy will be defined during authentication implementation.
+The policy is defined in `ADR/010-administrator-provisioned-accounts.md`: 10-128 characters, no composition rules, and not equal to the account's email (case-insensitive).
 
 ### 8.4 Password Reset
 
@@ -590,6 +641,21 @@ JWT signing keys must:
 - Be stored securely
 - Support rotation when required
 
+**Implemented: the `Jwt` configuration is validated at startup** (`JwtOptionsValidator`).
+
+| Key | Requirement |
+|---|---|
+| `Jwt:SigningKey` | Required, at least 32 bytes (256 bits, for HMAC-SHA256). |
+| `Jwt:Issuer`, `Jwt:Audience` | Required. |
+| `Jwt:AccessTokenLifetimeMinutes` | 1–1440. The default is 60. |
+
+- **Fail fast.** A missing or invalid value stops the application before it serves a request or touches the database, with an `OptionsValidationException` naming the key. The error names the key but never contains its value.
+- **No signing key in committed configuration.**
+  - `appsettings.json` keeps `SigningKey` empty, and `appsettings.Development.json` has none. A test enforces both.
+  - Development supplies the key through user secrets (`dotnet user-secrets set "Jwt:SigningKey" "<at least 32 random bytes>"`), which are loaded only in the Development environment.
+  - Every other environment supplies it through the environment (`Jwt__SigningKey`) or a secret store. A development key therefore cannot become a production key by accident.
+- **Token validation is unchanged:** signature, issuer, audience and lifetime are validated, with the default 5-minute clock skew.
+
 ### 9.5 Token Storage
 
 Token storage must follow the security requirements of the selected frontend architecture.
@@ -613,6 +679,21 @@ Permission
 ```
 
 > Valid token does not mean unrestricted access.
+
+### 9.7 Sign-in Eligibility
+
+Login (`POST /api/auth/login`) issues a token only when every check passes:
+
+- the email matches an account;
+- the password is correct;
+- the user account is active;
+- **for a Patient, the linked Patient record is active.**
+
+Deactivating a patient (`DELETE /api/patients/{id}`) deactivates only the Patient record; the user account stays active. Login therefore checks the record and refuses a deactivated patient.
+
+- The checks run after the password, and every failure gets the same `401`. A refusal reveals neither that the account exists nor why it was refused.
+- Other roles are unaffected.
+- A token issued **before** the deactivation remains valid until it expires (§9.3). There is no token revocation yet.
 
 ---
 
@@ -665,6 +746,8 @@ Rate limiting should be applied where abuse could affect security or availabilit
 - Password reset
 - Authentication endpoints
 - Public endpoints
+
+Implemented for login; see §16.
 
 ### 10.7 Error Responses
 
@@ -724,6 +807,30 @@ Technical details must be logged server-side.
 Frontend error handling is responsible for presentation and user experience, while backend error handling is responsible for classification and safe API responses.
 
 > Backend owns error classification and safe API responses. Frontend owns presentation and user experience.
+
+**Implemented: every error is an RFC 9457 ProblemDetails** (`application/problem+json`):
+
+```json
+{ "type": "https://tools.ietf.org/html/rfc9110#section-15.5.5", "title": "Not Found", "status": 404, "traceId": "00-..." }
+```
+
+- **Validation errors (`400`)** add `errors`, keyed by field: `{ "errors": { "Name": ["The name is required..."] } }`.
+- **Controller answers** (`400`, `404`, `409`, `429`) keep their status and specific `title`.
+- **Empty error responses** (`401`, `403`, an unknown route's `404`) get a ProblemDetails body from the status code pages middleware.
+- **Exceptions that escape a controller** are handled centrally by `ApiExceptionHandler`, always with a fixed, generic `title`:
+
+  | Exception | Status |
+  |---|---|
+  | Concurrency conflicts and duplicate-operation exceptions | `409` |
+  | `DomainException` | `409` |
+  | Domain validation `ArgumentException` (not `ArgumentNullException`) | `400` |
+  | Everything else | `500` "An unexpected error occurred." |
+
+- **Never in the response:** the exception's message, type, stack trace, SQL or inner exceptions. The developer exception page does not take over in Development either.
+- **Logging:**
+  - Unexpected exceptions are logged as errors with the exception, the HTTP method, the path (not the query string) and the same `traceId` the client received.
+  - Request bodies, headers and tokens are never logged.
+  - Client-caused exceptions are logged at Information without the exception.
 
 ### 10.8 API Security Principle
 
@@ -968,6 +1075,31 @@ Rate limits should protect the platform without negatively affecting normal clin
 
 Exact limits will be defined during implementation.
 
+**Implemented: login rate limit.**
+
+| Setting | Value |
+|---|---|
+| Endpoint | `POST /api/auth/login` only (`[EnableRateLimiting("login")]`). No other endpoint is rate-limited and there is no global limiter. |
+| Algorithm | Fixed window per client IP address (IPv4-mapped IPv6 counts as IPv4), no queueing. |
+| Default | 10 attempts per 60 seconds, configurable as `RateLimiting:Login:PermitLimit` (1–10000) and `RateLimiting:Login:WindowSeconds` (1–3600), validated at startup. |
+| Rejection | `429` ProblemDetails "Too many requests. Try again later." with `Retry-After` (seconds). |
+
+- **No account enumeration.** The limiter runs before the login handler, so a rejected attempt gets the same response whether or not the email exists or the password is right.
+- **Logging.** Rejections are logged at Warning with the client address, never the email.
+
+**Behind a reverse proxy.**
+
+- The client address is the connection's, which behind a proxy is the proxy's. Every client would then share one limit.
+- Configure the proxy's address(es) under `ForwardedHeaders:KnownProxies` (IP addresses) or `ForwardedHeaders:KnownNetworks` (CIDR). `X-Forwarded-For` and `X-Forwarded-Proto` are then honoured, **only from those addresses** and only the nearest hop (`ForwardLimit` 1).
+- With nothing configured (the default) forwarded headers are ignored entirely, so a client cannot choose its own address to escape the limit. Loopback is not trusted by default either.
+- Configure the proxy to overwrite, not append to, any `X-Forwarded-For` it receives from clients.
+
+**Production considerations.**
+
+- **Single instance only.** Limits are held in memory: they apply per API instance and reset on restart. A distributed limiter (for example Redis-backed) is needed before running several instances.
+- **Shared addresses.** Clients behind one NAT (a clinic office) share a limit. 10 per minute is sized for that.
+- **Per IP, not per account.** Per-account protection (lockout after repeated failures) is not implemented. A distributed attack from many addresses is limited only per address.
+
 ---
 
 ## 17. CORS & Client Access
@@ -985,6 +1117,34 @@ AllowAnyOrigin
 unless there is a clearly justified requirement.
 
 CORS is not an authentication mechanism and must not replace authorization.
+
+**Implemented: one CORS policy for the Admin application.**
+
+| Setting | Value |
+|---|---|
+| Origins | From `Cors:AllowedOrigins` only; nothing is hardcoded. |
+| Methods | `GET`, `POST`, `PUT`, `DELETE`. |
+| Request headers | `Authorization`, `Content-Type`. |
+| Exposed headers | `Location`, `Retry-After`. |
+| Credentials | **Not allowed.** Tokens travel in the `Authorization` header, not cookies. |
+| Preflight cache | 10 minutes. |
+
+**Origin validation at startup.** Each origin must be an exact `scheme://host[:port]`. Any of the following stops the application:
+
+- a wildcard (`*` or `*.example.com`);
+- a path, trailing slash, query or user info;
+- a scheme other than http/https;
+- http for a host other than `localhost` / `127.0.0.1` / `::1`.
+
+**Per environment.**
+
+- `appsettings.json` (all environments) has no origins, so no cross-origin access. That is right when the frontend is served from the API's own origin.
+- `appsettings.Development.json` allows `http://localhost:4200`, the Angular dev server's default (`ng serve`). For another port, change it there or set `Cors__AllowedOrigins__0=http://localhost:<port>`.
+- Production origins (`https://...`) are supplied by the deployment's configuration, for example `Cors__AllowedOrigins__0=https://admin.<your-domain>`. None is committed.
+
+**Middleware order.** CORS runs after routing and before authentication, so a preflight `OPTIONS` request is answered without a token.
+
+A request from another origin is still processed by the server: CORS only tells the browser not to expose the response. Authorization is enforced regardless.
 
 ---
 

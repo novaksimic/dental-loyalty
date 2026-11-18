@@ -1,5 +1,6 @@
 ﻿using DentalLoyalty.Application.Common.Interfaces;
 using DentalLoyalty.Domain.Entities;
+using Microsoft.EntityFrameworkCore;
 
 namespace DentalLoyalty.Infrastructure.Persistence.Repositories;
 
@@ -27,5 +28,14 @@ public sealed class ClinicRepository : IClinicRepository
 
         // One SaveChanges = one database transaction for both rows.
         await _context.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task<bool> ExistsAsync(
+        Guid id,
+        CancellationToken cancellationToken = default)
+    {
+        return await _context.Clinics
+            .AsNoTracking()
+            .AnyAsync(c => c.Id == id, cancellationToken);
     }
 }

@@ -1,3 +1,4 @@
+using DentalLoyalty.Application.Common.Exceptions;
 using DentalLoyalty.Application.Common.Interfaces;
 using DentalLoyalty.Domain.Entities;
 using DentalLoyalty.Infrastructure.Persistence;
@@ -94,7 +95,33 @@ public sealed class PatientRepository : IPatientRepository
         // linked the same Patient after it was read here, its active cycle
         // makes this cycle's insert fail on the one-active-cycle-per-Patient
         // index, and the whole save - including this link - is rolled back.
-        await _context.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await _context.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException ex)
+        {
+            // Recognised without provider-specific error codes, as for
+            // referrals and service occurrences: after the rollback, ask which
+            // concurrent change won.
+            if (await _context.Users.AsNoTracking()
+                    .AnyAsync(u => u.Email == user.Email && u.Id != user.Id, cancellationToken))
+            {
+                throw new DuplicateEmailException(
+                    "A user with this email already exists. Nothing was saved.",
+                    ex);
+            }
+
+            if (await _context.LoyaltyCycles.AsNoTracking()
+                    .AnyAsync(c => c.PatientId == patient.Id && c.Id != firstCycle.Id, cancellationToken))
+            {
+                throw new ConcurrencyConflictException(
+                    "The patient was linked to a user account by another operation. Nothing was saved.",
+                    ex);
+            }
+
+            throw;
+        }
     }
 
     public async Task<Patient?> GetByIdAsync(
@@ -149,4 +176,62 @@ public sealed class PatientRepository : IPatientRepository
 
         await _context.SaveChangesAsync(cancellationToken);
     }
+
+    // The escape character for LIKE patterns built from search terms.
+    private const string LikeEscape = "\\";
+
+    public async Task<PatientPage> ListForTenantAsync(
+        Guid clinicId,
+        IReadOnlyList<string> searchTerms,
+        bool? isActive,
+        int skip,
+        int take,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(searchTerms);
+
+        // The tenant filter is part of the query itself, before anything else.
+        var patients = _context.Patients
+            .AsNoTracking()
+            .Where(p => p.ClinicId == clinicId);
+
+        if (isActive is bool active)
+        {
+            patients = patients.Where(p => p.IsActive == active);
+        }
+
+        // LIKE '%term%' per term; each term is a parameter, never SQL text. Its
+        // own %, _ and [ are escaped so they match literally. Case sensitivity
+        // follows the column collation (case-insensitive on SQL Server's
+        // default collation).
+        foreach (var term in searchTerms)
+        {
+            var pattern = $"%{EscapeLike(term)}%";
+
+            patients = patients.Where(p =>
+                EF.Functions.Like(p.FirstName, pattern, LikeEscape)
+                || EF.Functions.Like(p.LastName, pattern, LikeEscape)
+                || (p.Email != null && EF.Functions.Like(p.Email, pattern, LikeEscape))
+                || EF.Functions.Like(p.PhoneNumber, pattern, LikeEscape));
+        }
+
+        var totalCount = await patients.CountAsync(cancellationToken);
+
+        var items = await patients
+            .OrderBy(p => p.LastName)
+            .ThenBy(p => p.FirstName)
+            .ThenBy(p => p.Id)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync(cancellationToken);
+
+        return new PatientPage(items, totalCount);
+    }
+
+    private static string EscapeLike(string term) =>
+        term
+            .Replace(LikeEscape, LikeEscape + LikeEscape, StringComparison.Ordinal)
+            .Replace("%", LikeEscape + "%", StringComparison.Ordinal)
+            .Replace("_", LikeEscape + "_", StringComparison.Ordinal)
+            .Replace("[", LikeEscape + "[", StringComparison.Ordinal);
 }

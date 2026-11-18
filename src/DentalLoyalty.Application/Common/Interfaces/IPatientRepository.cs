@@ -17,6 +17,10 @@ public interface IPatientRepository
     // is. The Patient must have been loaded through this repository with no linked
     // User - an existing link is never replaced - and now be linked to user; the
     // cycle must belong to it.
+    //
+    // Throws DuplicateEmailException when another user already has the user's
+    // email, and ConcurrencyConflictException when another operation linked the
+    // Patient after it was loaded; nothing is saved in either case.
     Task LinkUserAsync(
         Patient patient,
         User user,
@@ -24,8 +28,8 @@ public interface IPatientRepository
         CancellationToken cancellationToken = default);
 
     // Not tenant-scoped - only safe for callers that are not acting on behalf of
-    // a specific tenant-scoped request (e.g. CreatePatientUserHandler, which is
-    // not yet reachable through any HTTP endpoint). Tenant-scoped/HTTP-reachable
+    // a specific tenant-scoped request. No production use case calls it today.
+    // Tenant-scoped/HTTP-reachable
     // use cases must use GetByIdForTenantAsync or GetByIdForPatientOwnerAsync
     // instead so the lookup itself enforces the tenant/ownership boundary.
     Task<Patient?> GetByIdAsync(
@@ -62,4 +66,22 @@ public interface IPatientRepository
     Task UpdateAsync(
         Patient patient,
         CancellationToken cancellationToken = default);
+
+    // One page of clinicId's patients, ordered by last name, first name and id,
+    // with the total number that match. Filtered in the database by clinic, by
+    // status when isActive is set, and by every search term: each must occur
+    // (case-insensitively where the database collation is) in the first name,
+    // last name, email or phone number. Wildcard characters in a term match
+    // themselves. Read-only: the patients returned are not tracked.
+    Task<PatientPage> ListForTenantAsync(
+        Guid clinicId,
+        IReadOnlyList<string> searchTerms,
+        bool? isActive,
+        int skip,
+        int take,
+        CancellationToken cancellationToken = default);
 }
+
+public sealed record PatientPage(
+    IReadOnlyList<Patient> Items,
+    int TotalCount);

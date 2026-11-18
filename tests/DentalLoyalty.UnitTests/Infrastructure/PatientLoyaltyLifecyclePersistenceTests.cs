@@ -1,9 +1,11 @@
+using DentalLoyalty.Application.Common.Exceptions;
 using DentalLoyalty.Application.Identity.Commands;
 using DentalLoyalty.Domain.Entities;
 using DentalLoyalty.Domain.Enums;
 using DentalLoyalty.Infrastructure.Persistence;
 using DentalLoyalty.Infrastructure.Persistence.Repositories;
 using DentalLoyalty.Infrastructure.Security;
+using DentalLoyalty.UnitTests.TestDoubles;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
@@ -249,17 +251,27 @@ public sealed class PatientLoyaltyLifecyclePersistenceTests : IDisposable
             new PatientRepository(context).LinkUserAsync(seeded, user, LoyaltyCycle.StartFirst(seeded)));
     }
 
-    // The real registration flow - CreatePatientUserHandler over the real
-    // repositories, sharing one context as in the API's request scope.
-    private async Task<Guid> RegisterAsync(Guid patientId, string email)
+    // The real account-creation flow - CreatePatientUserHandler over the real
+    // repositories, sharing one context as in the API's request scope, for a
+    // ClinicAdmin of clinicId.
+    private async Task<CreatePatientUserResult> CreateAccountAsync(Guid clinicId, Guid patientId, string email)
     {
         await using var context = CreateContext();
         var handler = new CreatePatientUserHandler(
             new UserRepository(context),
             new PatientRepository(context),
-            new PasswordHasher());
+            new PasswordHasher(),
+            FakeCurrentTenant.ForClinic(clinicId));
 
-        return await handler.HandleAsync(new CreatePatientUserCommand(patientId, email, "Sup3rSecret!"));
+        return await handler.HandleAsync(new CreatePatientUserCommand(patientId, email, "Sup3rSecret!pass"));
+    }
+
+    private async Task<Guid> RegisterAsync(Guid clinicId, Guid patientId, string email)
+    {
+        var result = await CreateAccountAsync(clinicId, patientId, email);
+
+        Assert.Equal(CreatePatientUserStatus.Created, result.Status);
+        return result.UserId!.Value;
     }
 
     private async Task<(Guid? UserId, DateTime? UpdatedAt, Guid[] UserIds, (Guid Id, DateTime StartedAt)[] Cycles)> ReadLinkStateAsync(Guid patientId)
@@ -281,12 +293,12 @@ public sealed class PatientLoyaltyLifecyclePersistenceTests : IDisposable
         var clinic = await SeedClinicAsync();
         var seeded = await SeedPatientWithAccountAsync(clinic.Id);
 
-        var userId = await RegisterAsync(seeded.Id, "ana@patient.test");
+        var userId = await RegisterAsync(clinic.Id, seeded.Id, "ana@patient.test");
         var before = await ReadLinkStateAsync(seeded.Id);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            RegisterAsync(seeded.Id, "ana@patient.test"));
+        var repeated = await CreateAccountAsync(clinic.Id, seeded.Id, "ana@patient.test");
 
+        Assert.Equal(CreatePatientUserStatus.AlreadyLinked, repeated.Status);
         AssertLinkUnchanged(before, await ReadLinkStateAsync(seeded.Id), userId);
     }
 
@@ -308,12 +320,12 @@ public sealed class PatientLoyaltyLifecyclePersistenceTests : IDisposable
         var clinic = await SeedClinicAsync();
         var seeded = await SeedPatientWithAccountAsync(clinic.Id);
 
-        var userId = await RegisterAsync(seeded.Id, "ana@patient.test");
+        var userId = await RegisterAsync(clinic.Id, seeded.Id, "ana@patient.test");
         var before = await ReadLinkStateAsync(seeded.Id);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            RegisterAsync(seeded.Id, "intruder@patient.test"));
+        var intruder = await CreateAccountAsync(clinic.Id, seeded.Id, "intruder@patient.test");
 
+        Assert.Equal(CreatePatientUserStatus.AlreadyLinked, intruder.Status);
         AssertLinkUnchanged(before, await ReadLinkStateAsync(seeded.Id), userId);
     }
 
@@ -322,7 +334,7 @@ public sealed class PatientLoyaltyLifecyclePersistenceTests : IDisposable
     {
         var clinic = await SeedClinicAsync();
         var seeded = await SeedPatientWithAccountAsync(clinic.Id);
-        var userId = await RegisterAsync(seeded.Id, "ana@patient.test");
+        var userId = await RegisterAsync(clinic.Id, seeded.Id, "ana@patient.test");
         var before = await ReadLinkStateAsync(seeded.Id);
 
         await using (var context = CreateContext())
@@ -342,9 +354,59 @@ public sealed class PatientLoyaltyLifecyclePersistenceTests : IDisposable
         AssertLinkUnchanged(before, await ReadLinkStateAsync(seeded.Id), userId);
     }
 
+    // Another clinic's patient is unreachable: the account request is answered
+    // as for no patient, and the patient stays unlinked with no user or cycle.
+    [Fact]
+    public async Task CreateAccount_ForAnotherClinicsPatient_IsNotFound_AndChangesNothing()
+    {
+        var clinicA = await SeedClinicAsync("Clinic A");
+        var clinicB = await SeedClinicAsync("Clinic B");
+        var patientOfB = await SeedPatientWithAccountAsync(clinicB.Id);
+
+        var result = await CreateAccountAsync(clinicA.Id, patientOfB.Id, "ana@patient.test");
+
+        Assert.Equal(CreatePatientUserStatus.PatientNotFound, result.Status);
+
+        var after = await ReadLinkStateAsync(patientOfB.Id);
+        Assert.Null(after.UserId);
+        Assert.Empty(after.UserIds);
+        Assert.Empty(after.Cycles);
+    }
+
+    // The email was taken after the duplicate check (here: by a user saved
+    // through another context): the unique index stops the save, it is
+    // reported as a duplicate, and nothing of the link is saved.
+    [Fact]
+    public async Task LinkUserAsync_EmailTakenConcurrently_ThrowsDuplicateEmail_AndSavesNothing()
+    {
+        var clinic = await SeedClinicAsync();
+        var seeded = await SeedPatientWithAccountAsync(clinic.Id);
+        var user = new User(clinic.Id, "ana@patient.test", "not-a-real-hash", UserRole.Patient);
+
+        await using var context = CreateContext();
+        var repository = new PatientRepository(context);
+        var patient = await repository.GetByIdForTenantAsync(seeded.Id, clinic.Id);
+        patient!.LinkUser(user.Id);
+
+        await using (var racer = CreateContext())
+        {
+            racer.Users.Add(new User(clinic.Id, "ana@patient.test", "racer-hash", UserRole.ClinicAdmin));
+            await racer.SaveChangesAsync();
+        }
+
+        await Assert.ThrowsAsync<DuplicateEmailException>(() =>
+            repository.LinkUserAsync(patient, user, LoyaltyCycle.StartFirst(patient)));
+
+        var after = await ReadLinkStateAsync(seeded.Id);
+        Assert.Null(after.UserId);
+        Assert.DoesNotContain(user.Id, after.UserIds);
+        Assert.Empty(after.Cycles);
+    }
+
     // Two first links of the same Patient racing: both read it unlinked. The one
-    // saved second fails on the one-active-cycle-per-Patient index and is rolled
-    // back entirely, so the first link is not overwritten.
+    // saved second fails on the one-active-cycle-per-Patient index, is rolled
+    // back entirely and reported as a concurrency conflict, so the first link is
+    // not overwritten.
     [Fact]
     public async Task LinkUserAsync_ConcurrentFirstLinks_SecondIsRolledBack_AndFirstLinkStays()
     {
@@ -365,7 +427,7 @@ public sealed class PatientLoyaltyLifecyclePersistenceTests : IDisposable
 
         await firstRepository.LinkUserAsync(firstPatient, firstUser, LoyaltyCycle.StartFirst(firstPatient));
 
-        await Assert.ThrowsAsync<DbUpdateException>(() =>
+        await Assert.ThrowsAsync<ConcurrencyConflictException>(() =>
             secondRepository.LinkUserAsync(secondPatient, secondUser, LoyaltyCycle.StartFirst(secondPatient)));
 
         var after = await ReadLinkStateAsync(seeded.Id);

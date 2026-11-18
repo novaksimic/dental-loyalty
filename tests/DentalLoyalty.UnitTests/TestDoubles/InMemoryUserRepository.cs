@@ -15,7 +15,11 @@ public sealed class InMemoryUserRepository : IUserRepository
 
     public Task<User?> GetByEmailAsync(string email, CancellationToken cancellationToken = default)
     {
-        var user = _users.SingleOrDefault(u => u.Email == email);
+        // Same rule as UserRepository: exact, or the lower-cased form;
+        // exact preferred. Case-sensitive, like SQLite.
+        var lowered = email.ToLowerInvariant();
+        var user = _users.FirstOrDefault(u => u.Email == email)
+            ?? _users.FirstOrDefault(u => u.Email == lowered);
         return Task.FromResult(user);
     }
 }

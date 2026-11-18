@@ -1,4 +1,6 @@
 ﻿using System.Text;
+using DentalLoyalty.Application.Catalog.Commands;
+using DentalLoyalty.Application.Catalog.Queries;
 using DentalLoyalty.Application.Clinics.Commands;
 using DentalLoyalty.Application.Common.Interfaces;
 using DentalLoyalty.Application.Identity.Commands;
@@ -8,6 +10,8 @@ using DentalLoyalty.Application.Loyalty.Queries;
 using DentalLoyalty.Application.Patients.Commands;
 using DentalLoyalty.Application.Patients.Queries;
 using DentalLoyalty.Application.Referrals.Commands;
+using DentalLoyalty.Application.Rewards.Commands;
+using DentalLoyalty.Application.Rewards.Queries;
 using DentalLoyalty.Infrastructure.Persistence;
 using DentalLoyalty.Infrastructure.Persistence.Repositories;
 using DentalLoyalty.Infrastructure.Security;
@@ -34,6 +38,7 @@ public static class DependencyInjection
         services.AddScoped<IPatientRepository, PatientRepository>();
         services.AddScoped<CreatePatientHandler>();
         services.AddScoped<GetPatientByIdHandler>();
+        services.AddScoped<GetPatientsHandler>();
         services.AddScoped<GetCurrentPatientHandler>();
         services.AddScoped<UpdatePatientContactHandler>();
         services.AddScoped<DeactivatePatientHandler>();
@@ -43,11 +48,21 @@ public static class DependencyInjection
         services.AddScoped<ILoyaltyConfigurationRepository, LoyaltyConfigurationRepository>();
         services.AddScoped<ILoyaltyAccountRepository, LoyaltyAccountRepository>();
         services.AddScoped<IServiceRepository, ServiceRepository>();
+        services.AddScoped<GetServicesHandler>();
+        services.AddScoped<GetServiceByIdHandler>();
+        services.AddScoped<CreateServiceHandler>();
+        services.AddScoped<UpdateServiceHandler>();
+        services.AddScoped<SetServiceActiveHandler>();
         services.AddScoped<ILoyaltyCycleRepository, LoyaltyCycleRepository>();
         services.AddScoped<LoyaltyCycleProgression>();
         services.AddScoped<IPatientServiceRepository, PatientServiceRepository>();
         services.AddScoped<RecordPatientServiceHandler>();
         services.AddScoped<IRewardRepository, RewardRepository>();
+        services.AddScoped<GetRewardsHandler>();
+        services.AddScoped<GetRewardByIdHandler>();
+        services.AddScoped<CreateRewardHandler>();
+        services.AddScoped<UpdateRewardHandler>();
+        services.AddScoped<SetRewardActiveHandler>();
         services.AddScoped<GetPatientRewardsHandler>();
         services.AddScoped<ILoyaltyHistoryRepository, LoyaltyHistoryRepository>();
         services.AddScoped<LoyaltyHistoryStateLoader>();
@@ -76,7 +91,12 @@ public static class DependencyInjection
     {
         var jwtSection = configuration.GetSection(JwtOptions.SectionName);
 
-        services.Configure<JwtOptions>(jwtSection);
+        // Validated when first resolved and again when the host starts: an
+        // invalid configuration stops the application (JwtOptionsValidator).
+        services.AddOptions<JwtOptions>()
+            .Bind(jwtSection)
+            .ValidateOnStart();
+        services.AddSingleton<IValidateOptions<JwtOptions>, JwtOptionsValidator>();
         services.AddSingleton<IJwtTokenGenerator, JwtTokenGenerator>();
 
         services

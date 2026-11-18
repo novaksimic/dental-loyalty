@@ -11,4 +11,9 @@ public interface IClinicRepository
         Clinic clinic,
         LoyaltyConfiguration loyaltyConfiguration,
         CancellationToken cancellationToken = default);
+
+    // Whether a clinic with this id exists, active or not.
+    Task<bool> ExistsAsync(
+        Guid id,
+        CancellationToken cancellationToken = default);
 }

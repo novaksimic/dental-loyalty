@@ -4,34 +4,75 @@ using DentalLoyalty.Domain.Enums;
 
 namespace DentalLoyalty.Application.Identity.Commands;
 
+// Creates the user account of a patient of the caller's own clinic and links it
+// to the patient's record (ADR-010 decision 2). Patients do not self-register:
+// a ClinicAdmin creates the account. The link starts the patient's first loyalty
+// cycle (BUSINESS.md §5.1).
+//
+// The clinic is the authenticated tenant (ICurrentTenant), never a value from
+// the request: the patient is loaded within it, so a patient of another clinic
+// is indistinguishable from none, and the User gets the patient's clinic.
+//
+// Validation runs before anything is written; a rejected request creates
+// nothing. The User, the patient's link and the first cycle are saved together
+// in one save (IPatientRepository.LinkUserAsync) - all or nothing.
+//
+// Throws DuplicateEmailException when a concurrent request took the email, and
+// ConcurrencyConflictException when the patient was linked concurrently, after
+// the checks here; nothing is saved in either case.
 public sealed class CreatePatientUserHandler
 {
     private readonly IUserRepository _userRepository;
     private readonly IPatientRepository _patientRepository;
     private readonly IPasswordHasher _passwordHasher;
+    private readonly ICurrentTenant _currentTenant;
 
     public CreatePatientUserHandler(
         IUserRepository userRepository,
         IPatientRepository patientRepository,
-        IPasswordHasher passwordHasher)
+        IPasswordHasher passwordHasher,
+        ICurrentTenant currentTenant)
     {
         _userRepository = userRepository;
         _patientRepository = patientRepository;
         _passwordHasher = passwordHasher;
+        _currentTenant = currentTenant;
     }
 
-    public async Task<Guid> HandleAsync(
+    public async Task<CreatePatientUserResult> HandleAsync(
         CreatePatientUserCommand command,
         CancellationToken cancellationToken = default)
     {
-        var patient = await _patientRepository.GetByIdAsync(
+        // Fails closed like the other tenant-scoped patient use cases: without a
+        // trusted tenant there is no patient this caller can reach.
+        if (!_currentTenant.HasTenant)
+        {
+            return CreatePatientUserResult.Rejected(CreatePatientUserStatus.PatientNotFound);
+        }
+
+        if (!EmailAddress.TryNormalize(command.Email, out var email))
+        {
+            return CreatePatientUserResult.Rejected(CreatePatientUserStatus.InvalidEmail);
+        }
+
+        if (!PasswordPolicy.IsSatisfiedBy(command.Password, email))
+        {
+            return CreatePatientUserResult.Rejected(CreatePatientUserStatus.InvalidPassword);
+        }
+
+        var patient = await _patientRepository.GetByIdForTenantAsync(
             command.PatientId,
+            _currentTenant.ClinicId!.Value,
             cancellationToken);
 
         if (patient is null)
         {
-            throw new InvalidOperationException(
-                "Patient does not exist.");
+            return CreatePatientUserResult.Rejected(CreatePatientUserStatus.PatientNotFound);
+        }
+
+        if (!patient.IsActive)
+        {
+            return CreatePatientUserResult.Rejected(CreatePatientUserStatus.PatientInactive);
         }
 
         // The link is never replaced: a linked Patient - whether a repeated request
@@ -39,32 +80,26 @@ public sealed class CreatePatientUserHandler
         // anything is created, so its UserId and its loyalty cycle stay as they are.
         if (patient.UserId is not null)
         {
-            throw new InvalidOperationException(
-                "Patient is already linked to a user account.");
+            return CreatePatientUserResult.Rejected(CreatePatientUserStatus.AlreadyLinked);
         }
 
-        var existingUser = await _userRepository.GetByEmailAsync(
-            command.Email,
-            cancellationToken);
-
-        if (existingUser is not null)
+        // Users.Email is unique platform-wide, whatever the role or clinic. The
+        // unique index still stops a request that races with this check.
+        if (await _userRepository.GetByEmailAsync(email, cancellationToken) is not null)
         {
-            throw new InvalidOperationException(
-                "A user with this email already exists.");
+            return CreatePatientUserResult.Rejected(CreatePatientUserStatus.EmailAlreadyExists);
         }
 
-        var passwordHash = _passwordHasher.Hash(command.Password);
-
-        // ClinicId is taken from the existing Patient, not from the caller,
-        // so the User's tenant always matches the Patient it is linked to.
+        // ClinicId is taken from the Patient - itself loaded within the caller's
+        // tenant - so the User's tenant always matches the Patient it is linked to.
         var user = new User(
             clinicId: patient.ClinicId,
-            email: command.Email,
-            passwordHash: passwordHash,
+            email: email,
+            passwordHash: _passwordHasher.Hash(command.Password),
             role: UserRole.Patient);
 
-        // BUSINESS.md §5.1: the first loyalty cycle starts when registration and
-        // account linking are successfully completed.
+        // BUSINESS.md §5.1: the first loyalty cycle starts when the account is
+        // linked to the Patient record.
         patient.LinkUser(user.Id);
 
         var firstCycle = LoyaltyCycle.StartFirst(patient);
@@ -77,6 +112,6 @@ public sealed class CreatePatientUserHandler
             firstCycle,
             cancellationToken);
 
-        return user.Id;
+        return new CreatePatientUserResult(CreatePatientUserStatus.Created, user.Id, user.Email);
     }
 }

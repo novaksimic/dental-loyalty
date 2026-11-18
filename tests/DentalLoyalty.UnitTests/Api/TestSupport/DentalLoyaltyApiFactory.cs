@@ -31,6 +31,14 @@ public sealed class DentalLoyaltyApiFactory : WebApplicationFactory<Program>
                 ["Jwt:Audience"] = TestJwt.Audience,
                 ["Jwt:SigningKey"] = TestJwt.SigningKey,
                 ["Jwt:AccessTokenLifetimeMinutes"] = "60",
+
+                // Test requests share one client address, so the shared
+                // factory's login limit is high enough never to interfere;
+                // LoginRateLimitTests use their own, low limit.
+                ["RateLimiting:Login:PermitLimit"] = "10000",
+                ["RateLimiting:Login:WindowSeconds"] = "60",
+
+                ["Cors:AllowedOrigins:0"] = TestOrigins.Allowed,
             });
         });
 

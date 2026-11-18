@@ -77,4 +77,35 @@ public sealed class InMemoryPatientRepository : IPatientRepository
         _patients[patient.Id] = patient;
         return Task.CompletedTask;
     }
+
+    // The arguments of the last ListForTenantAsync call, for handler tests.
+    public (Guid ClinicId, IReadOnlyList<string> Terms, bool? IsActive, int Skip, int Take)? LastListCall { get; private set; }
+
+    // Same contract as PatientRepository, evaluated in memory (case-insensitive,
+    // like SQL Server's default collation).
+    public Task<PatientPage> ListForTenantAsync(
+        Guid clinicId,
+        IReadOnlyList<string> searchTerms,
+        bool? isActive,
+        int skip,
+        int take,
+        CancellationToken cancellationToken = default)
+    {
+        LastListCall = (clinicId, searchTerms, isActive, skip, take);
+
+        static bool Has(string? value, string term) =>
+            value is not null && value.Contains(term, StringComparison.OrdinalIgnoreCase);
+
+        var matches = _patients.Values
+            .Where(p => p.ClinicId == clinicId)
+            .Where(p => isActive is null || p.IsActive == isActive)
+            .Where(p => searchTerms.All(t =>
+                Has(p.FirstName, t) || Has(p.LastName, t) || Has(p.Email, t) || Has(p.PhoneNumber, t)))
+            .OrderBy(p => p.LastName, StringComparer.Ordinal)
+            .ThenBy(p => p.FirstName, StringComparer.Ordinal)
+            .ThenBy(p => p.Id)
+            .ToList();
+
+        return Task.FromResult(new PatientPage(matches.Skip(skip).Take(take).ToList(), matches.Count));
+    }
 }
